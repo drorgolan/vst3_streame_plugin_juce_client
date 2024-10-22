@@ -1,139 +1,156 @@
-import socket
 import numpy as np
 from kivy.app import App
-from kivy.graphics import Color, Line, Canvas
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.widget import Widget
-from threading import Thread
+from kivy.graphics import Line
+from kivy.clock import Clock
+import socket
+import threading
+import time
 
 
 class WaveformDisplay(Widget):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.data = []  # Store waveform data
-        self.bind(size=self.update_canvas)  # Redraw on resize
+        super(WaveformDisplay, self).__init__(**kwargs)
+        self.audio_buffer = None
+        self.bind(pos=self.update_canvas, size=self.update_canvas)
+
+    def set_audio_buffer(self, audio_buffer):
+        """Store the audio buffer to visualize and update the canvas."""
+        self.audio_buffer = self.low_pass_filter(audio_buffer)  # Apply low-pass filter
+        Clock.schedule_once(self.update_canvas)
+
+    def low_pass_filter(self, audio_data, window_size=5):
+        """Apply a simple moving average filter to smooth the audio data."""
+        if len(audio_data) < window_size:
+            return audio_data  # If the buffer is smaller than the window size, return as is
+
+        # Create a kernel for the moving average
+        kernel = np.ones(window_size) / window_size
+        filtered_data = np.convolve(audio_data, kernel, mode='valid')  # Apply the filter
+        return filtered_data
 
     def update_canvas(self, *args):
-        """Redraw the waveform on the canvas."""
-        self.canvas.clear()  # Clear previous drawings
+        """Update the canvas to visualize the audio buffer as a waveform."""
+        if self.audio_buffer is None or len(self.audio_buffer) == 0:
+            return
+
         with self.canvas:
-            Color(1, 1, 1, 1)  # White color for waveform lines
+            self.canvas.clear()  # Clear previous drawings
+            width, height = self.size
+            mid_height = height / 2
 
-            if self.data:
-                step = self.width / len(self.data)  # Horizontal step per sample
-                for i in range(len(self.data) - 1):
-                    x1 = i * step
-                    y1 = (self.data[i] + 1) * (self.height / 2)  # Scale Y values
-                    x2 = (i + 1) * step
-                    y2 = (self.data[i + 1] + 1) * (self.height / 2)
-                    Line(points=[x1, y1, x2, y2], width=2)
+            # Normalize the audio buffer to fit within the widget's height
+            max_amplitude = np.max(np.abs(self.audio_buffer)) if np.max(np.abs(self.audio_buffer)) > 0 else 1
+            scaled_waveform = (self.audio_buffer / max_amplitude) * (height / 2)
 
-    def update_data(self, new_data):
-        """Update data and redraw the canvas."""
-        self.data = new_data
-        self.update_canvas()
+            # Create line points from the audio buffer
+            points = []
+            for i, sample in enumerate(scaled_waveform):
+                x = (i / len(scaled_waveform)) * width
+                y = mid_height + sample + 400
+                points.extend([x, y])
 
+            if points:
+                Line(points=points, width=1)
+            else:
+                print("No points to draw.")
 
-class UDPReceiver(Thread):
-    def __init__(self, ip, port, display):
-        super().__init__()
-        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_socket.setblocking(0)  # Set non-blocking mode
-        self.display = display
-        self.running = True  # Control thread execution
-
-        try:
-            self.udp_socket.bind((ip, port))
-            print(f"Listening for UDP packets on {ip}:{port}")
-        except Exception as e:
-            print("Failed to bind UDP socket:", e)
-
-    def run(self):
-        """Thread entry point to receive UDP data."""
-        while self.running:
-            try:
-                data, _ = self.udp_socket.recvfrom(8192)  # Buffer size
-                print(f"Data received: {len(data)} bytes")
-                self.process_audio_data(data)
-            except BlockingIOError:
-                pass  # No data available yet
-            except Exception as e:
-                print("Error receiving data:", e)
-
-    def stop(self):
-        """Stop the thread."""
-        self.running = False
-        self.udp_socket.close()
-
-    def process_audio_data(self, data):
-        """Process received audio data."""
-        num_samples = len(data) // 4  # Assuming float32 (4 bytes per sample)
-        audio_data = np.frombuffer(data, dtype=np.float32)[:num_samples]
-
-        if np.max(np.abs(audio_data)) != 0:
-            audio_data = audio_data / np.max(np.abs(audio_data))  # Normalize
-
-        # Update the waveform display with new data on the main thread
-        self.display.update_data(audio_data)
-
-
-class MyKivyApp(App):
+class UDPListenerApp(App):
     def build(self):
-        self.receiver_thread = None  # Keep track of the UDP thread
+        self.destination_ip = "127.0.0.1"  # IP to listen on
+        self.destination_port = 5005  # Port to listen on
+        self.threads = []  # List to track all threads
+        self.keep_listening = False  # Initialize keep_listening flag
 
+        # Layout
         layout = BoxLayout(orientation='vertical')
 
-        # Input fields for IP and port
-        self.ip_input = TextInput(hint_text='Enter IP Address', multiline=False)
-        self.port_input = TextInput(hint_text='Enter Port', multiline=False)
-        start_button = Button(text='Start UDP Receiver')
-        stop_button = Button(text='Stop UDP Receiver')
+        # Info label
+        self.info_label = Label(text="Waiting for input...", size_hint=(1, None), height=50)
+        layout.add_widget(self.info_label)
 
-        start_button.bind(on_press=self.start_udp_receiver)
-        stop_button.bind(on_press=self.stop_udp_receiver)
+        # Create a container for the WaveformDisplay using FloatLayout
+        waveform_container = FloatLayout(size_hint=(1, None), height=100)
+        self.waveform_display = WaveformDisplay(size_hint=(1, 1))  # Set height to fill the container
+        waveform_container.add_widget(self.waveform_display)
 
-        # Waveform display widget
-        self.waveform_display = WaveformDisplay()
+        layout.add_widget(waveform_container)
 
-        # Add widgets to the layout
-        layout.add_widget(self.ip_input)
-        layout.add_widget(self.port_input)
+        # Start Listening button
+        start_button = Button(text="Start Listening", size_hint=(1, None), height=50)
+        start_button.bind(on_press=self.start_listening)  # Ensure this matches the method name
         layout.add_widget(start_button)
-        layout.add_widget(stop_button)
-        layout.add_widget(self.waveform_display)
 
         return layout
 
-    def start_udp_receiver(self, instance):
-        """Start the UDP receiver thread."""
-        ip = self.ip_input.text
-        port = int(self.port_input.text)
+    def log(self, message):
+        """Log messages in the log output area."""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        # Here you could add code to display log messages if needed
 
-        if self.receiver_thread is None or not self.receiver_thread.is_alive():
+    def start_listening(self, instance):
+        """Start listening for UDP packets on the specified IP and port."""
+        try:
+            # Create UDP socket and bind to IP/Port
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Enable SO_REUSEADDR
+            self.udp_socket.bind((self.destination_ip, self.destination_port))
+
+            self.info_label.text = f"Listening on {self.destination_ip}:{self.destination_port}"
+            self.log(f"Listening started on {self.destination_ip}:{self.destination_port}")
+
+            self.keep_listening = True  # Start listening
+            # Start a thread to listen for incoming data
+            listening_thread = threading.Thread(target=self.listen_for_data)
+            listening_thread.daemon = True  # Daemonize thread to close with app
+            self.threads.append((listening_thread, self.udp_socket))  # Store thread and socket
+            listening_thread.start()
+
+        except Exception as e:
+            self.info_label.text = f"Error: {str(e)}"
+            self.log(f"Error starting listener: {str(e)}")
+
+    def listen_for_data(self):
+        """Listen for incoming UDP data and update the waveform display."""
+        self.udp_socket.setblocking(0)  # Set the socket to non-blocking mode
+        while self.keep_listening:  # Continue while the flag is True
             try:
-                self.receiver_thread = UDPReceiver(ip, port, self.waveform_display)
-                self.receiver_thread.start()
-                print("UDP receiver started.")
-            except socket.gaierror as e:
-                print("Socket error:", e)
-            except Exception as e:
-                print("Unexpected error:", e)
+                # Receive data from the socket (adjust buffer size as needed)
+                data, addr = self.udp_socket.recvfrom(4096)
 
-    def stop_udp_receiver(self, instance):
-        """Stop the UDP receiver thread."""
-        if self.receiver_thread and self.receiver_thread.is_alive():
-            self.receiver_thread.stop()
-            self.receiver_thread.join()  # Ensure the thread has stopped
-            print("UDP receiver stopped.")
+                # Convert the received data to a NumPy array
+                audio_data = np.frombuffer(data, dtype=np.float32)
+
+                # Ensure the UI update is scheduled on the main thread
+                Clock.schedule_once(lambda dt: self.waveform_display.set_audio_buffer(audio_data))
+
+                # Log the reception of data
+                self.log(f"Received data from {addr}")
+
+            except BlockingIOError:
+                # Ignore the error if no data is available
+                time.sleep(0.01)  # Sleep briefly to avoid busy waiting
+            except OSError as e:
+                self.log(f"Error: {e}")
+                break  # Break the loop if the socket is closed
+
+    def stop_all_threads(self):
+        """Stop all running threads and close their sockets."""
+        for thread, udp_socket in self.threads:
+            udp_socket.close()  # Close the socket to unblock recvfrom
+            thread.join()  # Wait for the thread to finish
+
+        self.threads.clear()  # Clear the thread list after stopping all
 
     def on_stop(self):
-        """Ensure the thread is stopped when the app exits."""
-        if self.receiver_thread and self.receiver_thread.is_alive():
-            self.receiver_thread.stop()
-            self.receiver_thread.join()
-
+        """Clean up resources when the application is closing."""
+        self.keep_listening = False  # Stop the listening loop
+        self.stop_all_threads()  # Stop all threads
 
 if __name__ == '__main__':
-    MyKivyApp().run()
+    UDPListenerApp().run()

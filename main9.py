@@ -69,28 +69,13 @@ class UDPListenerApp(App):
         self.info_label = Label(text="Waiting for input...", size_hint=(1, None), height=50)
         layout.add_widget(self.info_label)
 
-        # Add IP and Port Configuration
-        ip_port_layout = BoxLayout(orientation='horizontal', size_hint=(1, None), height=50)
-
-        ip_label = Label(text="IP Address:", size_hint=(0.3, 1))
-        self.ip_input = TextInput(text=self.destination_ip, size_hint=(0.7, 1))
-        ip_port_layout.add_widget(ip_label)
-        ip_port_layout.add_widget(self.ip_input)
-
-        port_label = Label(text="Port:", size_hint=(0.3, 1))
-        self.port_input = TextInput(text=str(self.destination_port), size_hint=(0.7, 1))
-        ip_port_layout.add_widget(port_label)
-        ip_port_layout.add_widget(self.port_input)
-
-        layout.add_widget(ip_port_layout)
-
-        # Add Waveform Display
         waveform_container = FloatLayout(size_hint=(1, None), height=100)
         self.waveform_display = WaveformDisplay(size_hint=(1, 1))
         waveform_container.add_widget(self.waveform_display)
+
         layout.add_widget(waveform_container)
 
-        # Add Slider for Semitones
+        # Slider for semitones
         slider_layout = BoxLayout(orientation='horizontal', size_hint=(1, None), height=50)
         slider_label = Label(text="Semitone Shift:", size_hint=(0.5, 2), height=50)
         self.semitone_slider = Slider(min=-12, max=12, value=0, size_hint=(0.5, 2), height=50)
@@ -99,15 +84,6 @@ class UDPListenerApp(App):
         slider_layout.add_widget(self.semitone_slider)
         layout.add_widget(slider_layout)
 
-        # Add Volume Control
-        volume_layout = BoxLayout(orientation='horizontal', size_hint=(1, None), height=50)
-        volume_label = Label(text="Volume:", size_hint=(0.3, 1))
-        self.volume_slider = Slider(min=0, max=1, value=1, size_hint=(0.7, 1))
-        volume_layout.add_widget(volume_label)
-        volume_layout.add_widget(self.volume_slider)
-        layout.add_widget(volume_layout)
-
-        # Add Start, Save, Stop, and Play Buttons
         start_button = Button(text="Start Listening", size_hint=(1, None), height=50)
         start_button.bind(on_press=self.start_listening)
         layout.add_widget(start_button)
@@ -119,10 +95,6 @@ class UDPListenerApp(App):
         stop_button = Button(text="Stop Saving to WAV", size_hint=(1, None), height=50)
         stop_button.bind(on_press=self.stop_saving)
         layout.add_widget(stop_button)
-
-        play_button = Button(text="Play Audio Buffer", size_hint=(1, None), height=50)
-        play_button.bind(on_press=self.play_audio_buffer)
-        layout.add_widget(play_button)
 
         return layout
 
@@ -137,9 +109,6 @@ class UDPListenerApp(App):
 
     def start_listening(self, instance):
         try:
-            self.destination_ip = self.ip_input.text
-            self.destination_port = int(self.port_input.text)
-
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.udp_socket.bind((self.destination_ip, self.destination_port))
@@ -170,10 +139,6 @@ class UDPListenerApp(App):
                     audio_data = (audio_data / np.max(np.abs(audio_data))).astype(np.float32)
 
                 audio_data = self.correct_pitch(audio_data)
-
-                # Apply volume control
-                audio_data *= self.volume_slider.value
-
                 Clock.schedule_once(lambda dt: self.waveform_display.set_audio_buffer(audio_data))
 
                 if self.is_saving:
@@ -191,17 +156,6 @@ class UDPListenerApp(App):
                 self.log(f"Error: {e}")
                 break
 
-    def play_audio_buffer(self, instance):
-        if self.audio_buffers:
-            audio_data = np.concatenate(self.audio_buffers)
-            audio_segment = AudioSegment(
-                data=audio_data.tobytes(),
-                sample_width=2,
-                frame_rate=self.sample_rate,
-                channels=1
-            )
-            audio_segment.export("buffer_output.wav", format="wav")
-            audio_segment.play()  # Play using the default media player or another method
     def correct_pitch(self, audio_data, semitones=None):
         if semitones is None:
             semitones = self.semitones
